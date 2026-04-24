@@ -614,3 +614,669 @@ Conformal Prediction ←── 예측에 통계적 보장 부여
 1. Split Conformal Prediction 알고리즘 단계와 coverage 보장 설명
 2. PGD adversarial training의 min-max 구조 유도
 3. OOD score 함수들 (MSP/Mahalanobis/Energy) 비교 및 수식
+
+---
+
+# 📚 Part 6. 주요 개념 심화 보충 학습
+
+> 위의 핵심 정리를 바탕으로, 시험에서 자주 나오는 주요 개념들을 **쉬운 언어와 예시, 코드**로 풀어 설명한 보충 자료
+
+---
+
+## A. Mahalanobis Distance 심화 이해
+
+### A-1. 핵심 아이디어: "분포를 고려한 거리"
+
+일반적인 **유클리드 거리**는 자로 잰 직선 거리로, 데이터가 어떻게 분포되어 있는지 전혀 신경 쓰지 않는다. 반면 **마할라노비스 거리**는 "이 데이터 분포 기준으로 얼마나 이상한 점인가?"를 측정한다.
+
+**직관 예시**: 데이터가 타원형으로 분포되어 있을 때
+- 두 점 A, B가 중심에서 같은 유클리드 거리에 있어도
+- 점 A는 데이터가 퍼진 방향을 **따라** 있고 → 정상 샘플
+- 점 B는 데이터가 퍼진 방향을 **벗어나** 있으면 → OOD 의심!
+- 마할라노비스 거리는 이 차이를 구분해준다
+
+### A-2. 수식을 한 덩어리씩 이해하기
+
+```
+s(x) = -min_k (f(x) - μ_k)ᵀ Σ⁻¹ (f(x) - μ_k)
+```
+
+| 기호 | 의미 | 로봇 예시 비유 |
+|------|------|--------------|
+| `f(x)` | 입력 x의 특징 벡터 (neural net의 중간층 출력) | 센서 측정값 벡터 |
+| `μ_k` | 클래스 k의 평균 특징 벡터 | 클래스 k의 "대표값" |
+| `Σ` | 공분산 행렬 | 특징들이 서로 어떻게 퍼져있는지 |
+| `Σ⁻¹` | 공분산의 역행렬 | 분포 방향을 "정규화"하는 역할 |
+
+**수식을 말로 풀면**:
+1. `(f(x) - μ_k)`: 입력 특징이 클래스 k 평균에서 얼마나 떨어졌나?
+2. `Σ⁻¹`를 가운데 곱함: 데이터가 퍼진 방향을 고려해 거리를 **보정**
+3. `min_k`: 모든 클래스 중 **가장 가까운** 클래스까지의 거리
+4. 앞에 `-` 붙임: 거리가 멀수록 score가 작아짐 (OOD는 score 매우 낮음)
+
+### A-3. 왜 공분산 Σ가 필요한가?
+
+**쉬운 예시**: 로봇의 두 센서값
+- 센서 A: 0~100 범위
+- 센서 B: 0~1 범위
+
+유클리드 거리를 그냥 쓰면 **센서 A가 거리를 지배**해버린다 (숫자 크기가 크니까).
+공분산 행렬 Σ는 이런 **스케일 차이를 자동으로 조정**해주고, 두 센서 간 **상관관계**도 고려한다.
+
+### A-4. OOD Detection 실제 절차 (3단계)
+
+**1단계: 학습 데이터로 통계 추정 (오프라인)**
+- 각 클래스 k의 평균 특징벡터 μ_k 계산
+- 전체 공분산 행렬 Σ 계산 (모든 클래스 공유)
+- 이 둘은 저장해놓고 추후 사용
+
+**2단계: 새 입력 x가 들어오면 (실시간)**
+- 신경망 통과시켜 특징 f(x) 추출
+- 모든 클래스 k에 대해 마할라노비스 거리 계산
+- 가장 가까운 거리 선택
+
+**3단계: 임계값과 비교해 판단**
+- 거리가 작음 → 어떤 클래스의 "정상" 분포에 가까움 → ID
+- 거리가 큼 → 어느 클래스에도 속하지 않음 → OOD!
+- 임계값 τ는 validation set으로 결정
+
+### A-5. 간단한 파이썬 코드
+
+```python
+import numpy as np
+
+# 1단계: 학습 데이터로 μ_k와 Σ 미리 계산
+def fit_mahalanobis(features, labels, num_classes):
+    class_means = []  # 각 클래스의 평균 벡터
+    centered = []  # 공분산 계산용
+    
+    for k in range(num_classes):
+        # k번 클래스에 속한 샘플만 뽑기
+        class_features = features[labels == k]
+        # 평균 계산 (μ_k)
+        mu_k = class_features.mean(axis=0)
+        class_means.append(mu_k)
+        # 중심에서 뺀 값 저장
+        centered.append(class_features - mu_k)
+    
+    # 모든 클래스의 편차로 공유 공분산 Σ 계산
+    centered_all = np.concatenate(centered, axis=0)
+    cov = np.cov(centered_all.T)
+    # 역행렬 Σ⁻¹ 미리 계산 (한 번만 하면 됨)
+    cov_inv = np.linalg.inv(cov)
+    
+    return class_means, cov_inv
+
+
+# 2단계: 새 입력의 OOD score 계산
+def mahalanobis_score(x_feature, class_means, cov_inv):
+    distances = []
+    for mu_k in class_means:
+        # 중심에서 떨어진 양
+        diff = x_feature - mu_k
+        # 마할라노비스 거리 제곱: diff^T @ Σ⁻¹ @ diff
+        dist = diff @ cov_inv @ diff
+        distances.append(dist)
+    # 가장 가까운 클래스까지의 거리 (음수로 해서 score로 사용)
+    score = -min(distances)
+    return score
+
+
+# 3단계: 임계값으로 OOD 판정
+def is_ood(score, threshold):
+    return score < threshold
+```
+
+### A-6. 장단점
+
+**장점**
+- Feature 공간에서 작동 → softmax보다 풍부한 정보 사용
+- 클래스별 구조를 고려 → 각 클래스의 "정상 영역"을 타원으로 모델링
+- 학습 후 재학습 없이 적용 가능 (μ_k, Σ만 한 번 계산)
+
+**단점**
+- 가우시안 가정: 각 클래스 특징이 정규분포라고 가정 (실제론 그렇지 않을 수 있음)
+- 고차원에서 Σ 추정 어려움: 특징 차원이 크면 공분산 계산 불안정
+- 역행렬 계산 비용: Σ⁻¹ 구하는 게 무거움 (하지만 한 번만 하면 됨)
+
+---
+
+## B. ODIN 심화 이해
+
+### B-1. 왜 ODIN이 필요한가
+
+MSP의 문제점은 신경망이 **OOD 입력에도 높은 확률**을 부여한다는 것. 모르는 입력인데도 "나 이거 확신해!"라고 자신감 있게 틀린다 (confidently wrong).
+
+ODIN은 이 문제를 해결하려고 **두 가지 트릭**을 조합한다.
+
+### B-2. 기법 1: Temperature Scaling (온도 조절)
+
+기존 softmax에 **온도 T**를 추가:
+```
+p_k(x; T) = exp(z_k/T) / Σ_j exp(z_j/T)
+```
+
+**온도가 하는 역할**:
+- T = 1: 원래 softmax
+- T > 1: 분포가 **부드러워짐** (확률값들이 평평해짐)
+- T → ∞: 모든 클래스가 거의 균등 확률
+
+**왜 T를 크게 하면 ID/OOD 구분이 잘 될까?**
+
+핵심 통찰: **ID와 OOD는 logit 값의 "차이"가 다름**
+- **ID 입력**: 정답 클래스 logit이 다른 것들보다 훨씬 큼 (격차가 큼)
+- **OOD 입력**: logit들이 비교적 고만고만함 (격차가 작음)
+
+T로 나눠서 분포를 부드럽게 만들면, 이 "격차"가 확률값에 더 잘 드러난다. 논문에선 T = 1000 추천.
+
+### B-3. 기법 2: Input Perturbation (입력 살짝 건드리기)
+
+```
+x̃ = x - ε · sign(-∇_x log p_ŷ(x; T))
+```
+
+**풀어서 설명**:
+1. 입력 x에 대해 **예측된 클래스 ŷ의 확률을 더 높이는 방향**으로 x를 살짝 민다
+2. 그 방향으로 작은 섭동 ε만큼 이동
+3. 수정된 x̃로 다시 예측 → 이 값으로 OOD 판단
+
+**왜 효과가 있을까?**
+
+핵심 통찰: **ID와 OOD는 perturbation에 대한 반응이 다름**
+- **ID 입력**: 이미 자신있는 예측 → 살짝 밀면 확률이 **더 크게 증가**
+- **OOD 입력**: 애매한 예측 → 밀어도 확률이 **덜 증가**
+
+즉, "밀었을 때 얼마나 더 확신하게 되는가?"가 ID/OOD 구분 신호가 된다.
+
+### B-4. ODIN 전체 절차
+
+1. **Input Perturbation**: 예측 확률을 높이는 방향으로 x를 ε만큼 밀기 → x̃
+2. **Temperature-scaled Softmax**: x̃를 신경망에 통과시켜 logit 얻고, T로 나눠 softmax
+3. **MSP로 판단**: s(x) = max_k p_k(x̃; T), 임계값 τ보다 크면 ID, 작으면 OOD
+
+### B-5. 간단한 파이썬 코드
+
+```python
+import torch
+import torch.nn.functional as F
+
+def odin_score(model, x, temperature=1000, epsilon=0.0014):
+    """
+    ODIN OOD score 계산
+    """
+    # 입력에 gradient 계산 가능하게 설정
+    x = x.clone().detach().requires_grad_(True)
+    
+    # 1단계 준비: logit 뽑고 temperature 적용
+    logits = model(x)
+    scaled_logits = logits / temperature
+    
+    # log softmax로 안정적으로 계산
+    log_probs = F.log_softmax(scaled_logits, dim=1)
+    max_log_prob, _ = log_probs.max(dim=1)
+    
+    # 1단계: 입력 섭동
+    # 예측 확률을 높이는 방향의 gradient 계산
+    loss = -max_log_prob.sum()
+    loss.backward()
+    # gradient의 부호 방향으로 x를 아주 살짝 밈
+    x_perturbed = x - epsilon * x.grad.sign()
+    
+    # 2단계: 수정된 입력으로 다시 softmax
+    with torch.no_grad():
+        logits_new = model(x_perturbed)
+        scaled_logits_new = logits_new / temperature
+        probs_new = F.softmax(scaled_logits_new, dim=1)
+    
+    # 3단계: MSP 계산
+    score, _ = probs_new.max(dim=1)
+    return score
+```
+
+### B-6. 장단점
+
+**장점**
+- 재학습 불필요: 이미 학습된 모델에 바로 적용
+- 구현 간단: MSP + 두 가지 트릭만 추가
+- MSP 대비 성능 향상 확실함
+
+**단점**
+- Hyperparameter 2개: T와 ε을 validation set으로 튜닝 필요
+- Gradient 계산 필요: 추론 시 역전파 한 번 → 약간 느림
+- 여전히 softmax 기반: 근본적 한계 존재
+
+---
+
+## C. Adversarial Robustness 심화 이해
+
+### C-1. Adversarial Example의 놀라운 현상
+
+사람 눈에는 **완전히 똑같아 보이는** 이미지인데, 픽셀 몇 개를 아주 미세하게 바꾸면 신경망이 완전히 다른 답을 내놓는다.
+
+**예시**: 판다 사진 + 사람 눈에 안 보이는 미세 노이즈 = 모델이 "긴팔원숭이" (99.3% 확신)로 오답
+
+**왜 이런 일이 생길까?**
+고차원 공간의 기하학적 특성 때문. 신경망은 결정 경계 근처에서 **선형에 가깝게** 동작하는데, 작은 변화들이 여러 차원에 걸쳐 축적되면 경계를 넘어가버린다.
+
+**로봇 제어 맥락**:
+- 카메라 센서에 약간의 스티커 → 자율주행차가 표지판 오인식
+- LiDAR 포인트 클라우드에 미세 조작 → 장애물 감지 실패
+- 안전이 중요한 시스템에서 치명적인 문제
+
+### C-2. FGSM 공격 구현
+
+```python
+def fgsm_attack(model, x, y, epsilon=0.03):
+    # 입력에 gradient 계산 켜기
+    x = x.clone().detach().requires_grad_(True)
+    # forward pass
+    output = model(x)
+    loss = F.cross_entropy(output, y)
+    # gradient 계산
+    loss.backward()
+    # gradient 부호 방향으로 한 번에 이동
+    x_adv = x + epsilon * x.grad.sign()
+    # 픽셀 값이 [0, 1] 범위 벗어나지 않게 자르기
+    x_adv = torch.clamp(x_adv, 0, 1)
+    return x_adv.detach()
+```
+
+### C-3. PGD 공격 구현
+
+PGD = **FGSM을 여러 번 반복** + **안전 범위 안에 머물게 projection**
+
+1. 작은 step size α로 FGSM을 반복 적용
+2. 매번 ε-ball 안으로 투영 (원본에서 너무 멀어지지 않게)
+3. 수십 번 반복하면 훨씬 강한 공격
+
+```python
+def pgd_attack(model, x, y, epsilon=0.03, alpha=0.007, steps=10):
+    # 원본 저장 (projection 기준점)
+    x_original = x.clone().detach()
+    
+    # 랜덤 초기화 (ε-ball 안에서)
+    x_adv = x_original + torch.empty_like(x).uniform_(-epsilon, epsilon)
+    x_adv = torch.clamp(x_adv, 0, 1).detach()
+    
+    # 반복 공격
+    for _ in range(steps):
+        x_adv.requires_grad_(True)
+        output = model(x_adv)
+        loss = F.cross_entropy(output, y)
+        loss.backward()
+        # FGSM 스타일로 한 step 이동
+        x_adv = x_adv.detach() + alpha * x_adv.grad.sign()
+        # ε-ball 안으로 projection
+        delta = torch.clamp(x_adv - x_original, -epsilon, epsilon)
+        x_adv = torch.clamp(x_original + delta, 0, 1).detach()
+    
+    return x_adv
+```
+
+### C-4. Adversarial Training Min-Max 구조 이해
+
+```
+min_θ  E_{(x,y) ~ D} [ max_{‖δ‖_p ≤ ε} L(f_θ(x+δ), y) ]
+```
+
+**두 덩어리로 이해**:
+
+**내부 max: 공격자 역할**
+- 수식: `max_{‖δ‖≤ε} L(f(x+δ), y)`
+- 의미: "이 입력 x를 가장 잘 속일 수 있는 perturbation δ를 찾자!"
+- 보통 PGD로 계산 (수십 번 반복)
+- 각 학습 샘플마다 adversarial example 생성
+
+**외부 min: 방어자 역할 (모델 학습)**
+- 수식: `min_θ E[...]`
+- 의미: "그 최악의 공격에도 손실이 작도록 모델 파라미터 θ를 학습!"
+- 일반적인 SGD로 θ 업데이트
+- 단, 깨끗한 x 대신 adversarial x+δ 사용
+
+두 단계를 매 배치마다 반복 — 게임처럼 공격과 방어가 공진화한다.
+
+### C-5. Adversarial Training 알고리즘 구조
+
+```python
+# Adversarial Training 기본 구조
+for epoch in range(num_epochs):
+    for x, y in train_loader:
+        # 내부 max: PGD로 최악의 공격 찾기
+        x_adv = pgd_attack(model, x, y, epsilon, alpha, steps=7)
+        
+        # 외부 min: adversarial 입력으로 학습
+        output = model(x_adv)
+        loss = F.cross_entropy(output, y)
+        
+        # 모델 파라미터 업데이트
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+```
+
+### C-6. Randomized Smoothing의 의미
+
+**아이디어**: 입력에 **가우시안 노이즈**를 여러 번 주입하고 **다수결**로 답 결정
+
+```
+g(x) = argmax_c P_{δ ~ N(0, σ²I)} [f(x+δ) = c]
+```
+
+**왜 이게 강건한가?**
+- 노이즈를 **많이** 주입하므로 작은 공격 perturbation은 묻혀버림
+- 수학적으로 어떤 `‖δ‖_2 ≤ R` 반경 안에서는 **답이 안 바뀜**이 증명됨
+- R은 σ와 투표 margin에서 계산됨
+
+**왜 중요한가?**
+- 안전 critical 시스템 (의료, 자율주행)에 **수학적 보장** 제공
+- 새 공격이 나와도 보장이 유지됨
+
+---
+
+## D. TRADES 심화 이해
+
+### D-1. 왜 TRADES가 필요한가
+
+기존 Madry의 adversarial training은 adversarial 입력으로만 학습시킨다:
+```
+min_θ E[max L(f(x+δ), y)]
+```
+
+**문제**: 깨끗한 입력에 대한 정확도(clean accuracy)가 많이 떨어지고, **trade-off를 조절할 수 있는 손잡이**가 없음.
+
+**TRADES의 해결책**: 손실함수를 **두 항으로 쪼개고**, 사이에 조절 knob β를 넣음
+
+### D-2. TRADES 손실 함수 두 항 이해
+
+```
+L_TRADES(x, y) = -log p_θ(y|x) + β · max_{‖δ‖≤ε} KL(p_θ(·|x) ‖ p_θ(·|x+δ))
+```
+
+**첫 번째 항: `-log p(y|x)`**
+- 일반 cross-entropy loss
+- 깨끗한 x로 정답 맞추기
+- **clean accuracy 유지** 담당
+- "기본기를 잃지 말자"
+
+**두 번째 항 (× β): `KL(p(·|x) ‖ p(·|x+δ))`**
+- KL divergence로 출력 분포 간 차이 측정
+- δ 섭동 전후의 예측 비교
+- **출력 일관성 (smoothness)** 담당
+- "흔들리지 말자"
+
+### D-3. KL Divergence의 역할
+
+KL divergence는 **두 확률 분포가 얼마나 다른가**를 측정한다:
+```
+KL(P ‖ Q) = Σ_k P(k) log(P(k) / Q(k))
+```
+- 두 분포가 똑같으면 KL = 0
+- 두 분포가 다를수록 KL이 커짐
+
+TRADES에서는 "**원본 x에 대한 예측**"과 "**공격당한 x+δ에 대한 예측**"이 얼마나 다른지를 측정한다. TRADES는 KL이 큰 모델을 penalize해서, 학습이 진행되면서 공격 전후 출력이 일관되도록 유도한다. 이게 "**predictive distribution을 stabilize**"한다는 의미.
+
+### D-4. β 값의 영향 (실험적 감각)
+
+| β 값 | Clean Acc | Robust Acc | 특징 |
+|------|-----------|------------|------|
+| 0 | 95% | 0% | 일반 학습과 동일 |
+| 1 | 90% | 40% | 약한 robust |
+| **6** | **85%** | **55%** | **TRADES 논문 추천값** |
+| 10 | 80% | 58% | robust 우선 |
+
+핵심: β는 **task 요구사항에 맞춰 선택**하는 하이퍼파라미터. 안전이 중요하면 크게, 성능이 중요하면 작게.
+
+### D-5. Madry AT vs TRADES 비교
+
+| 특성 | Madry AT | TRADES |
+|------|----------|--------|
+| **수식 구조** | min-max 한 줄 | 두 항의 합 |
+| **학습 입력** | adversarial만 사용 | clean + adversarial 둘 다 |
+| **Clean accuracy** | 크게 감소 | 덜 감소 |
+| **Trade-off 조절** | 불가능 | β로 가능 |
+| **철학** | "공격받은 입력에서도 정답을 맞춰라" | "공격 전후 예측이 비슷해야 한다" |
+
+### D-6. 간단한 파이썬 코드
+
+```python
+import torch
+import torch.nn.functional as F
+
+def trades_loss(model, x, y, epsilon=0.03, alpha=0.007, 
+                steps=10, beta=6.0):
+    # 1. 원본 x의 출력 분포 계산
+    model.eval()
+    with torch.no_grad():
+        logits_clean = model(x)
+        probs_clean = F.softmax(logits_clean, dim=1)
+    
+    # 2. PGD로 최악의 perturbation δ 찾기 (KL 최대화)
+    x_adv = x.clone().detach() + 0.001 * torch.randn_like(x)
+    x_adv = torch.clamp(x_adv, 0, 1)
+    
+    for _ in range(steps):
+        x_adv.requires_grad_(True)
+        logits_adv = model(x_adv)
+        log_probs_adv = F.log_softmax(logits_adv, dim=1)
+        # KL divergence 계산 (최대화할 대상)
+        kl = F.kl_div(log_probs_adv, probs_clean, 
+                      reduction='batchmean')
+        # gradient로 KL이 커지는 방향 찾기
+        grad = torch.autograd.grad(kl, x_adv)[0]
+        # PGD 업데이트
+        x_adv = x_adv.detach() + alpha * grad.sign()
+        # ε-ball 안으로 projection
+        delta = torch.clamp(x_adv - x, -epsilon, epsilon)
+        x_adv = torch.clamp(x + delta, 0, 1).detach()
+    
+    # 3. TRADES 손실 계산
+    model.train()
+    # 첫 항: clean 입력으로 cross-entropy
+    logits_clean = model(x)
+    loss_clean = F.cross_entropy(logits_clean, y)
+    # 둘째 항: KL divergence (출력 일관성)
+    logits_adv = model(x_adv)
+    loss_kl = F.kl_div(
+        F.log_softmax(logits_adv, dim=1),
+        F.softmax(logits_clean, dim=1),
+        reduction='batchmean'
+    )
+    # 두 항 결합
+    total_loss = loss_clean + beta * loss_kl
+    return total_loss
+```
+
+### D-7. TRADES의 철학적 의미
+
+**"Stabilize the predictive distribution"**
+- Madry AT: "공격당한 입력에서도 정답을 맞춰라"
+- TRADES: "공격당하기 전과 후의 예측이 비슷해야 한다"
+
+**왜 더 원리적인가?**
+- Adversarial 문제의 본질 = **결정 경계가 입력 근처에 너무 가깝게 있음**
+- TRADES는 이 본질을 **직접 공략** (경계를 멀리 밀어내는 효과)
+- Madry AT는 간접적으로만 공략
+
+---
+
+## E. Conformal Prediction 심화 이해
+
+### E-1. Point Prediction vs Set Prediction
+
+**기존 방식 (Point Prediction)**
+- 입력: 고양이 사진
+- 출력: "고양이" (확률 85%)
+- 문제: 모델이 애매할 때도 무조건 하나만 고르게 됨. 틀리면 그냥 틀린 거.
+
+**Conformal Prediction (Set Prediction)**
+- 입력: 애매한 동물 사진
+- 출력: **{고양이, 강아지, 토끼}** ← 집합!
+- 보장: 이 집합 안에 정답이 1-α 확률로 있음
+
+### E-2. 핵심 보장 공식 풀어보기
+
+```
+P{Y_{n+1} ∈ C(X_{n+1})} ≥ 1 - α
+```
+
+| 기호 | 의미 |
+|------|------|
+| `X_{n+1}` | 새로운 입력 |
+| `Y_{n+1}` | 그 입력의 **진짜 정답** |
+| `C(X_{n+1})` | 모델이 반환한 **prediction set** |
+| `α` | **miscoverage rate** (틀릴 허용치) |
+| `1-α` | **coverage** (맞을 최소 확률) |
+
+**말로 풀면**: "새로운 입력의 **진짜 정답**이 내가 반환한 **집합 안에** 들어있을 확률이 **최소 1-α이다**"
+
+**예시 (α = 0.1)**:
+- Coverage = 90%
+- "100번 예측하면 **최소 90번**은 정답이 내 집합 안에 있다"
+- 나머지 10번은 집합이 정답을 놓칠 수 있음 (허용 오차)
+
+### E-3. 세 가지 놀라운 특성
+
+**1. Distribution-free (분포 무관)**
+- 데이터 분포에 대한 가정 전혀 없음
+- 가우시안? 아니어도 OK
+- 단, **exchangeability**만 만족하면 됨 (IID보다 약한 조건)
+
+**2. Finite-sample (유한 샘플 보장)**
+- 샘플이 적어도 바로 보장 성립
+- n → ∞일 때만이 아니라 n = 100에서도 OK
+- 일반 통계와 다른 점: 점근적(asymptotic)이 아님!
+
+**3. Model-agnostic (모델 무관)**
+- 어떤 모델이든 사용 가능
+- Deep Neural Network, XGBoost, Random Forest, 선형 회귀 등등
+- 기존 모델 위에 얇은 wrapper로 추가
+
+### E-4. 전통 방법과의 차이
+
+| 구분 | 전통 방법 | Conformal Prediction |
+|------|----------|---------------------|
+| **분포 가정** | "정규분포" 가정 | **가정 없음** |
+| **보장** | 샘플 무한대 가정 | **유한 샘플에서도 OK** |
+| **모델** | 특정 모델에 한정 | **어떤 모델이든 OK** |
+| **조건** | IID 필요 | **Exchangeability만** (더 약함) |
+
+### E-5. "conformal"이란 말의 뜻
+
+영어로 "**맞아떨어지는, 부합하는**"이라는 뜻.
+
+**알고리즘 관점**:
+1. Calibration set: 검증용으로 따로 떼어둔 데이터
+2. 새 입력이 들어오면, 각 후보 레이블에 대해 "이게 얼마나 **conform (부합)**하는가?" 점수 계산
+3. 그 점수가 **충분히 conform**하면 집합에 포함
+4. "충분히"의 기준은 **coverage 1-α**를 만족하도록 맞춤
+
+즉, 이름 자체가 "**calibration set에 잘 맞아떨어지는 레이블만 선택**"이라는 뜻.
+
+### E-6. 실용적 예시: "dog or rabbit"
+
+모델이 **확신할 수 없을 때**, 하나를 찍어서 틀리느니 **두 개 다 말하는 게 낫다**:
+- 기존: "dog" (51%) ← 틀리면 오답
+- CP: **{dog, rabbit}** ← 정답이 이 안에 90% 확률로 있음
+
+**로봇 공학 관점 활용**:
+- **물체 인식**: 애매하면 "{머그컵, 유리잔, 텀블러}" 반환 → 더 확인 후 집기
+- **경로 계획**: 95% 확률로 충돌 없는 경로 집합 반환 → 안전 margin 확보
+- **센서 기반 판단**: 불확실하면 크게, 확실하면 작게 set → 적응적 의사결정
+
+### E-7. Set 크기와 α의 관계
+
+| α | Coverage | 기대 set 크기 | 해석 |
+|---|----------|-------------|------|
+| 0.01 | 99% | 보통 3-5개 | 매우 안전, 큰 집합 |
+| 0.05 | 95% | 보통 2-3개 | 표준적 |
+| 0.10 | 90% | 보통 1-2개 | 실용적 균형 |
+| 0.20 | 80% | 보통 1개 | 느슨함 |
+
+- α가 **작을수록** (예: 0.01) → 더 엄격한 coverage → **집합이 커짐**
+- α가 **클수록** (예: 0.2) → 느슨한 coverage → **집합이 작아짐**
+
+### E-8. Split Conformal Prediction 5단계 상세
+
+**1단계: 데이터 분할**
+- 전체 데이터를 Training set + Calibration set으로 나눔
+- 보통 80:20 정도
+
+**2단계: 모델 학습**
+- Training set으로 모델 f̂ 학습 (일반적인 학습 과정과 동일)
+
+**3단계: Nonconformity Score 계산**
+- Calibration set의 각 샘플에서 s_i = 1 - f̂(x_i)_{y_i}
+- (작을수록 잘 맞춘 것)
+
+**4단계: Quantile 계산**
+- `q̂ = Quantile(s_1, ..., s_n ; ⌈(n+1)(1-α)⌉ / n)`
+- 유한 샘플 보장을 위해 약간 보정된 quantile
+
+**5단계: Prediction Set 구성**
+- 새 입력 x_test에 대해:
+- `C(x_test) = { y : 1 - f̂(x_test)_y ≤ q̂ }`
+- 즉, "score가 임계값 q̂ 이하인 모든 레이블"을 집합에 포함
+
+이 절차로 `P(Y ∈ C(X)) ≥ 1 - α`가 수학적으로 보장됨 (Exchangeability만 만족하면 됨).
+
+### E-9. ⚠️ Marginal vs Conditional Coverage (시험 필수!)
+
+**Marginal Coverage (Standard CP가 주는 것)**
+```
+P(Y ∈ C(X)) ≥ 1 - α
+```
+- **전체 평균적으로** 1-α 보장
+- 모든 입력을 통틀어 평균
+
+**Conditional Coverage (더 강한 조건)**
+```
+P(Y ∈ C(X) | X = x) ≥ 1 - α
+```
+- **특정 입력 x**에 대해서도 1-α 보장
+- 훨씬 강한 조건
+
+**왜 중요한가?**
+- Standard Conformal = Marginal only!
+- 평균은 90%지만, **특정 그룹에서는 70%만** 보장될 수 있음
+- 예: 전체적으로 90% coverage지만, 흑인 환자 그룹에서는 75%만 → 공정성 문제
+- 이게 현재 CP 연구의 활발한 방향
+
+### E-10. 직관 한 줄 요약
+
+> **"하나를 찍어 틀리느니, 가능한 후보를 집합으로 반환하고 수학적으로 보장하자"**
+
+이게 Conformal Prediction의 철학이다. 기존 ML의 **overconfident** 문제를 근본적으로 다른 관점에서 해결하는 것.
+
+---
+
+## 🎓 보충 학습 요약 — 한 페이지 Cheat Sheet
+
+### Mahalanobis Distance
+- Feature space에서 **분포를 고려한** 거리
+- 공분산 Σ가 스케일/상관관계 자동 조정
+- Class-conditional Gaussian 가정
+
+### ODIN
+- MSP 개선판 = **Temperature (T) + Input Perturbation (ε)**
+- ID와 OOD의 logit 격차 증폭 + 반응 민감도 차이 활용
+
+### Adversarial Robustness
+- **FGSM**: 1-step, 빠르고 약함
+- **PGD**: 반복+projection, 표준 공격
+- **Adversarial Training**: min-max 구조, 공격-방어 공진화
+- **Randomized Smoothing**: 수학적 보장 있는 certified 방어
+
+### TRADES
+- Loss = clean CE + β · KL(p(x) ‖ p(x+δ))
+- β로 clean-robust trade-off 명시적 조절
+- "Predictive distribution을 stabilize"
+
+### Conformal Prediction
+- **Point → Set prediction** 패러다임 전환
+- **Distribution-free, finite-sample, model-agnostic**
+- Marginal coverage만 보장 (Conditional은 더 강함)
+- Exchangeability만 있으면 됨
+
+---
+
+> 📌 이 보충 자료는 핵심 정리 내용을 바탕으로, 시험 및 실무에서 자주 혼동되는 개념들을 쉬운 예시와 코드로 풀어 정리한 것. 특히 로봇 제어 맥락의 응용 가능성을 함께 고려함.
